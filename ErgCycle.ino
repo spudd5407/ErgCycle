@@ -1,13 +1,11 @@
-//bl: cad discrete, servo test fail, 022419
-//183kc in 15 2/18/19 update = 4
-
+//2/27/19
 #include <Wire.h>   //i^c for the display
 #include <LCDKeypad.h>    //pushbuttons on A0
 #include <Adafruit_MotorShield.h>
 #include "ErgCycle.h"
 
 //#define DEBUG     //comment this out to stop serial debugging
-//#define DEBUG1    //connect to RM1 and use lcd for debug
+#define DEBUG1    //connect to host and use lcd for debug
 //#define DEBUG2		//host comm only no erg hardware
 
 #define DEBOUNCE_TIME 100 //for reading reed
@@ -25,6 +23,7 @@ unsigned int valf0, valf1, valf2;
 int diff;  //position error
 int diffv;  //velocity error
 int rc; //return code 
+int incomingbyte = 0;
 unsigned char crc ;
 
 unsigned long maxpower = 0;
@@ -42,6 +41,7 @@ unsigned long tottime = 0;
 unsigned long starttime, pedaltime, timeold; //rpm calc
 unsigned long last_interrupt_time = 0; //for debounce check
 unsigned long lastupdate;   //timer for screen update
+unsigned long laststat;	//last status report time
 unsigned long worktime, workstart;  //timer for work calc
 float power, work, kJoules;
 float wtjeff = 0.2; //amateur racer
@@ -73,10 +73,10 @@ void setup() {
   uint8_t recd[9];	// array of received bytes
   uint8_t *reply = (uint8_t *)"LinkUp";
 
-  Serial.begin(2400); // set up com port computrainer 2400baud
-  #ifndef DEBUG2
-  lcd.begin(16, 2);  //display has 16 columns and 2 rows
+  lcd.begin(16, 2);	//display has 16 columns and 2 rows
   lcd.clear();
+
+  Serial.begin(2400); // set up com port computrainer 2400baud
   Serial.println("Beginning Servo Test..");
   AFMS.begin();
   myMotor->setSpeed(100);     //set default speed
@@ -151,7 +151,6 @@ void setup() {
   lcd.print("kCAL=");
   lastupdate = millis();  //initialize timer for first calc
   cycstart = millis(); //initial for ride time and 
-  #endif
 } //END Setup
 
 // connect the port when Racermate is recd from pc
@@ -174,6 +173,8 @@ int ConnectHost()
   }
   return 0;
 }
+
+
 
 void loop()
 {
@@ -350,13 +351,13 @@ void loop()
   else  //if connected to RM1 or
   {
     //move actuator to command position
-    while (valf > (loadcmd * 11)) {
+    while (valf > loadcmd * 11) {
       myMotor->run(BACKWARD);  //get toward center posn
       delay(10);
       valf = analogRead(potpin);
     }
     myMotor->run(RELEASE);
-    while (valf < (loadcmd * 9)) {
+    while (valf < loadcmd * 9) {
       myMotor->run(FORWARD);  //get toward center posn
       delay(10);
       valf = analogRead(potpin);
@@ -372,57 +373,32 @@ void loop()
   if (Serial.available() && !Connected)
   {
     ConnectHost();
-    //rc = 0;
+    rc = 0;
   }
 
   // Can expect valid control messages from GC every 200ms
   if (Serial.available() && Connected)
   {
-    //rc = getMessage();	//this reads the CT style buffer and loads buf array
-    rc = Serial.readBytes(buf, 7);
-  }
-  // only update the trainer data structure following a valid control message
-  if (rc > 0)	//if the read returned data
-  {
-    unpackTelemetry(type, value8, value12);
-#ifdef DEBUG //check telemetry decode
-    Serial.println();
-    Serial.print("type = ");
-    Serial.println(type, BIN);
-    Serial.print("value8 = ");
-    Serial.println(value8, BIN);
-    Serial.print("value12= ");
-    Serial.println(value12, BIN);
-#endif
-#ifdef DEBUG1
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Type=");
-    lcd.print(type);
-    lcd.setCursor(8, 0);
-    lcd.print("val8=");
-    lcd.print(value8);
-    lcd.setCursor(0, 1);
-    lcd.print("val12=");
-    lcd.print(value12);
-#endif
+	while (incomingbyte != 0x40)	//keep reading until get the loadcmd
+	{
+    incomingbyte = Serial.read();
+	}
+	value = Serial.read();	//payload is in the next byte
   }
 
-  if (type == 0x40)   //load update yay!
-  {
-    if (value8 != loadcmd)
+    if (value != loadcmd)
     {
-      loadcmd = value8; //update if changed
+      loadcmd = value; //update if changed
     }
     //move the motor to the cmd posn
     // load is percentage 0x32 = 50% 199 max?
-  }
+ // }
   // move motor towards required position, do this anyway for 100ms refresh
   // MotorController(&data);
-
-  if (rc > 0)	//rotate the message type to host
-  {
-    switch (lasttype) {
+	if ((millis()-laststat)>100)  //send status every 100ms
+    {
+ 	//rotate the message type to host
+     switch (lasttype) {
 
       case CT_SPEED:
         type = CT_POWER;
@@ -436,26 +412,27 @@ void loop()
 
       case CT_HEARTRATE:
         type = CT_CADENCE;
-        value = rpm;
+        value = DEFAULT_CADENCE; //rpm;
         break;
 
       case CT_CADENCE:
         type = CT_SPEED;
-        value = speedmps * 10;
+        value = DEFAULT_SPEED; //speedmps * 10;
         break;
 
       default:
         break;
-
-    }
-
+	    }
+   
     PrepareStatusMessage( type, *buf);
-    
+
     // update pc with current status
     sendCommand();
+	  laststat = millis();
     lasttype = type;
     rc = 0;	
-  }
+    }
+  
 } //END LOOP
 
 void rpm_fun()  //update the rpm on interrupt
@@ -499,7 +476,7 @@ void PrepareStatusMessage(int mode, uint8_t *buf)  //int mode double value
   buf[1] = 0x00;
   buf[2] = 0x00;  //spinscan data
   buf[3] = buttons;   //byte 3 is all button data
-  buf[4] = mode;//CADENCE  4 BITS 0X06, 
+  buf[4] = mode;//CADENCE  4 BITS 0X06
   buf[5] = 0;
   buf[5] |= (value & (128 + 64 + 32 + 16 + 8 + 4 + 2)) >> 1;
   buf[6] = 128; //SYNC BIT
@@ -578,6 +555,7 @@ int rawWrite(uint8_t *bytes, int size)
   return rc;
 }
 
+//read bytes one at a time until we get 0x40 and then grab the load value
 int rawRead(uint8_t bytes[], int size)
 {
   int rc = 0;
